@@ -143,7 +143,6 @@ class PlacementSchedule(Base):
         Integer,
         ForeignKey("placement_drives.id", name="fk_placement_schedules_drive_id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     round_type: Mapped[str] = mapped_column(
         String(50), nullable=False
@@ -185,7 +184,6 @@ class StudentAcademicRecord(Base):
         Integer,
         ForeignKey("students.id", name="fk_student_academic_records_student_id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
     )
     cgpa: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     grading_scale: Mapped[float] = mapped_column(Float, default=10.0, server_default="10.0", nullable=False)

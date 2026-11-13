@@ -18,6 +18,7 @@ from backend.models.identity import User
 from agents.state.state import AgentState
 from agents.tools import QUERY_TOOL_DEFINITIONS, execute_tool
 from agents.common.formatter import sanitize_plain_english
+from agents.common.llm_client import call_llm_tool_selector, get_current_timestamp_context
 
 
 def _extract_intent_and_tool_call(message: str, user: User) -> Tuple[str, Dict[str, Any]]:
@@ -1067,61 +1068,28 @@ def run_query_agent(
 ) -> Dict[str, Any]:
     """
     Executes the Query Agent node in the multi-agent graph.
-    Selects authorized tools, queries PostgreSQL, and produces grounded responses.
+    Selects authorized tools, queries SQLite/PostgreSQL, and produces grounded responses.
     """
     message = state.get("message", "")
+    temporal_ctx = get_current_timestamp_context()
 
-    # 1. Check if ANTHROPIC_API_KEY is configured for LLM tool calling
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    allowed_tools = [
+        t for t in QUERY_TOOL_DEFINITIONS if user.role in t.get("allowed_roles", [])
+    ]
+
+    # 1. Multi-Provider LLM Tool Call (Groq, Gemini, Ollama, Anthropic)
     tool_name = None
     tool_args: Dict[str, Any] = {}
 
-    if api_key and not api_key.startswith("mock-") and not api_key.startswith("test-"):
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
+    llm_selection = call_llm_tool_selector(message, allowed_tools, user)
+    if llm_selection:
+        tool_name, tool_args = llm_selection
 
-            from anthropic.types import ToolParam
-
-            allowed_tools = [
-                t for t in QUERY_TOOL_DEFINITIONS if user.role in t["allowed_roles"]
-            ]
-            anthropic_tools: list[ToolParam] = [
-                {
-                    "name": str(t["name"]),
-                    "description": str(t["description"]),
-                    "input_schema": cast(dict[str, Any], t.get("parameters", {})),
-                }
-                for t in allowed_tools
-            ]
-
-            response = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=1024,
-                system=(
-                    f"You are the RIO-MJP Campus Assistant Query Agent. You answer campus questions strictly "
-                    f"by invoking available database tools. Caller identity: User ID {user.id}, Role {user.role}. "
-                    f"Never invent campus information. Always call a tool if the user is asking about schedules, "
-                    f"faculty, courses, rooms, or calendar events."
-                ),
-                messages=[{"role": "user", "content": message}],
-                tools=anthropic_tools,
-            )
-
-            for block in response.content:
-                if block.type == "tool_use":
-                    tool_name = block.name
-                    tool_args = block.input
-                    break
-
-        except Exception:
-            tool_name = None
-
-    # Fallback / Deterministic extractor
+    # 2. Fallback / Deterministic extractor
     if not tool_name:
         tool_name, tool_args = _extract_intent_and_tool_call(message, user)
 
-    # 2. Execute tool against database
+    # 3. Execute tool against database
     tool_result = execute_tool(
         tool_name=tool_name,
         tool_args=tool_args,
@@ -1129,7 +1097,7 @@ def run_query_agent(
         db=db,
     )
 
-    # 3. Format grounded response
+    # 4. Format grounded response
     response_text, sources = format_grounded_response(
         tool_name=tool_name,
         tool_args=tool_args,
@@ -1145,4 +1113,7 @@ def run_query_agent(
         "tool_calls": tool_calls,
         "tool_results": tool_results,
         "sources": sources,
+        "current_datetime": temporal_ctx["current_datetime"],
+        "current_date": temporal_ctx["current_date"],
+        "current_day": temporal_ctx["current_day"],
     }

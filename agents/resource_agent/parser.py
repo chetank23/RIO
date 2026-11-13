@@ -258,22 +258,28 @@ def extract_resource_details(text: str) -> Dict[str, Any]:
             res_details["resource_type"] = r_type
             break
 
+    # Detect direct facility code candidates (e.g. "LAB-102", "SH-201", "CR-101")
+    code_match = re.search(r"\b([a-zA-Z]{2,4}-\d{2,4})\b", text)
+    if code_match:
+        res_details["resource_name"] = code_match.group(1).upper()
+
     # Detect Named Resource Candidates (e.g. "Seminar Hall A", "CSE Lab 1", "Auditorium 1", "Room 101")
     # Negative lookahead ensures prepositions like 'on', 'at', 'from' are not captured as name suffixes
-    name_patterns = [
-        r"\b(seminar\s+hall\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
-        r"\b(cse\s+lab\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
-        r"\b(lab\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
-        r"\b(auditorium\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
-        r"\b(room\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
-        r"\b(main\s+auditorium)\b",
-        r"\b(portable\s+projector\s+[0-9]+)\b",
-    ]
-    for np in name_patterns:
-        m = re.search(np, text_lower)
-        if m:
-            res_details["resource_name"] = m.group(1).title()
-            break
+    if not res_details.get("resource_name"):
+        name_patterns = [
+            r"\b(seminar\s+hall\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
+            r"\b(cse\s+lab\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
+            r"\b(lab[\s-]+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
+            r"\b(auditorium\s+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
+            r"\b(room[\s-]+(?!(?:on|at|from|for|in|with|by|to|available|free|booked|open|vacant|needed|wanted)\b)[a-zA-Z0-9_-]+)\b",
+            r"\b(main\s+auditorium)\b",
+            r"\b(portable\s+projector\s+[0-9]+)\b",
+        ]
+        for np in name_patterns:
+            m = re.search(np, text_lower)
+            if m:
+                res_details["resource_name"] = m.group(1).title()
+                break
 
     # Capacity extraction: "capacity 50", "capacity of 100", "for 60 students", "50 seats"
     cap_patterns = [

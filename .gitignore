@@ -1,4 +1,5 @@
 # Environments
+.venv/
 venv/
 env/
 .env
@@ -42,6 +43,7 @@ MANIFEST
 *.sqlite3
 *.sqlite
 *.db
+!data/campus.db
 test_pg_5433/
 REVA_School_of_CSE_Faculty.xlsx
 
@@ -58,6 +60,8 @@ eval/results/
 
 # Node
 node_modules/
+frontend/node_modules/
+frontend/dist/
 backend/node_modules/
 backend/package.json
 backend/package-lock.json

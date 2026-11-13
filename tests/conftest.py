@@ -181,9 +181,13 @@ def pytest_configure(config):
     Pytest session configuration hook.
     Runs BEFORE any test modules are collected or imported.
     Validates TEST_DATABASE_URL and configures DATABASE_URL to point to test_schema.
-    Fails closed immediately if TEST_DATABASE_URL is missing or unsafe.
+    When TEST_DATABASE_URL is explicitly set, fails closed if missing or unsafe.
+    When TEST_DATABASE_URL is not set, allows unit/solver tests to run without database.
     """
-    get_test_urls()
+    load_dotenv(".env")
+    test_raw = os.environ.get("TEST_DATABASE_URL", "").strip()
+    if test_raw:
+        get_test_urls()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -192,6 +196,11 @@ def setup_test_database():
     Session-scoped test fixture that initializes the isolated test_schema
     in the validated test database.
     """
+    test_raw = os.environ.get("TEST_DATABASE_URL", "").strip()
+    if not test_raw:
+        yield
+        return
+
     clean_url, schema_url = get_test_urls()
 
     # Keep engine references available for cleanup even when setup fails midway.

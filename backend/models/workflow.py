@@ -17,12 +17,15 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+_JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
 
 from backend.utils.datetime_utils import utc_now
 from .base import Base
@@ -104,9 +107,9 @@ class AuditLog(Base):
     action: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     entity_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # JSONB for flexible old/new value capture — PostgreSQL-native
-    old_value: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    new_value: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # JSONB for flexible old/new value capture — PostgreSQL-native, SQLite JSON compatible
+    old_value: Mapped[Optional[dict]] = mapped_column(_JSON_TYPE, nullable=True)
+    new_value: Mapped[Optional[dict]] = mapped_column(_JSON_TYPE, nullable=True)
     timestamp: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utc_now, server_default=func.now()
     )
@@ -122,7 +125,7 @@ class AgentProposal(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    proposal_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    proposal_id: Mapped[str] = mapped_column(String(100), nullable=False)
     proposal_type: Mapped[str] = mapped_column(String(50))  # 'SCHEDULING', 'RESOURCE_BOOKING', 'OPERATION'
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", name="fk_ap_user_id", ondelete="CASCADE"), nullable=False
@@ -133,7 +136,7 @@ class AgentProposal(Base):
     superseded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="FALSE")
     superseded_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="FALSE")
-    payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    payload: Mapped[Optional[dict]] = mapped_column(_JSON_TYPE, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utc_now, server_default=func.now()
     )
@@ -164,7 +167,7 @@ class NotificationOutbox(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
     last_attempt_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    payload: Mapped[Optional[dict]] = mapped_column(_JSON_TYPE, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utc_now, server_default=func.now()
     )

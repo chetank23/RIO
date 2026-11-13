@@ -6,6 +6,7 @@ input. It returns a structured result for the service layer; persistence,
 authorization, and publication remain outside this module.
 """
 
+import datetime
 import time
 from typing import List, Dict, Tuple, Optional, Any
 from collections import defaultdict
@@ -74,10 +75,10 @@ class TimetableSolver:
         section_id = assignment.section_id
         
         student_count = 0
-        if section_id:
-            student_count = self.sections[section_id].student_count
-        elif assignment.batch_id:
+        if assignment.batch_id and assignment.batch_id in self.batches:
             student_count = self.batches[assignment.batch_id].student_count
+        elif section_id and section_id in self.sections:
+            student_count = self.sections[section_id].student_count
 
         eligible = []
         for r_id, room in self.rooms.items():
@@ -85,7 +86,7 @@ class TimetableSolver:
                 continue
                 
             if hour_type == 'PRACTICAL':
-                if room.room_type == 'LAB' and r_id in self.labs:
+                if room.room_type == 'LAB' and (r_id in self.labs or not self.labs):
                     eligible.append(r_id)
             else:
                 if room.room_type in ('CLASSROOM', 'SEMINAR_HALL', 'AUDITORIUM'):
@@ -104,7 +105,51 @@ class TimetableSolver:
             eligible.append(t_id)
         return eligible
 
+    def _get_contiguous_blocks(self, eligible_slots: List[int], block_len: int) -> List[Tuple[int, ...]]:
+        """
+        Finds all tuples of slot IDs of length `block_len` that are strictly consecutive
+        on the same day (t_{i}.end_time == t_{i+1}.start_time) and none is BREAK or LUNCH.
+        """
+        if block_len <= 1:
+            return [(s,) for s in eligible_slots]
+
+        day_norm_map = {
+            "MON": "MON", "MONDAY": "MON",
+            "TUE": "TUE", "TUESDAY": "TUE",
+            "WED": "WED", "WEDNESDAY": "WED",
+            "THU": "THU", "THURSDAY": "THU",
+            "FRI": "FRI", "FRIDAY": "FRI",
+            "SAT": "SAT", "SATURDAY": "SAT",
+            "SUN": "SUN", "SUNDAY": "SUN",
+        }
+
+        day_slots = defaultdict(list)
+        for s_id in eligible_slots:
+            slot = self.slots.get(s_id)
+            if not slot or getattr(slot, "slot_type", "") in ("BREAK", "LUNCH"):
+                continue
+            raw_d = str(slot.day).strip().upper() if slot.day else ""
+            d = day_norm_map.get(raw_d, raw_d[:3] if len(raw_d) >= 3 else "")
+            if d:
+                day_slots[d].append(slot)
+
+        blocks = []
+        for d, s_list in day_slots.items():
+            s_list.sort(key=lambda s: s.start_time if s.start_time else datetime.time.min)
+            for i in range(len(s_list) - block_len + 1):
+                window = s_list[i : i + block_len]
+                is_contiguous = True
+                for k in range(block_len - 1):
+                    if window[k].end_time != window[k + 1].start_time:
+                        is_contiguous = False
+                        break
+                if is_contiguous:
+                    blocks.append(tuple(s.id for s in window))
+        return blocks
+
     def build_model(self):
+        self.model = cp_model.CpModel()
+        self.x = {}
         # 1. Create Decision Variables
         # x[a_id, h_type, r_id, t_id] = 1 if assignment a's hour_type is scheduled in room r at time t
         
@@ -146,27 +191,65 @@ class TimetableSolver:
                 if len(eligible_slots) < req_hours:
                     return False, f"Not enough available slots for faculty {f_id} teaching {course.id}"
                 
-                var_list = []
-                for r_id in eligible_rooms:
-                    for t_id in eligible_slots:
-                        var_name = f"x_a{a.id}_{h_type}_r{r_id}_t{t_id}"
-                        v = self.model.new_bool_var(var_name)
-                        self.x[(a.id, h_type, r_id, t_id)] = v
-                        var_list.append(v)
-                        
-                        a_r_t_vars[(a.id, h_type)].append(v)
-                        f_t_vars[(f_id, t_id)].append(v)
-                        if sec_id:
-                            s_t_vars[(sec_id, t_id)].append(v)
-                        if batch_id:
-                            b_t_vars[(batch_id, t_id)].append(v)
-                        elif sec_id:
-                            for b in self.batches.values():
-                                if b.section_id == sec_id:
-                                    b_t_vars[(b.id, t_id)].append(v)
-                        r_t_vars[(r_id, t_id)].append(v)
-                
-                self.assignment_vars.append((a, h_type, req_hours, var_list))
+                is_lab_block = (h_type == 'PRACTICAL' and req_hours in (2, 3))
+                if is_lab_block:
+                    contiguous_blocks = self._get_contiguous_blocks(eligible_slots, req_hours)
+                    if not contiguous_blocks:
+                        return False, f"No valid contiguous {req_hours}-period lab blocks available for faculty {f_id} teaching {course.id}"
+                    
+                    block_choices = []
+                    for r_id in eligible_rooms:
+                        for b_tuple in contiguous_blocks:
+                            bv = self.model.new_bool_var(f"block_a{a.id}_r{r_id}_b{'_'.join(str(tid) for tid in b_tuple)}")
+                            block_choices.append((bv, r_id, b_tuple))
+                    
+                    self.model.add_exactly_one([bv for bv, _, _ in block_choices])
+
+                    for r_id in eligible_rooms:
+                        for t_id in eligible_slots:
+                            var_name = f"x_a{a.id}_{h_type}_r{r_id}_t{t_id}"
+                            v = self.model.new_bool_var(var_name)
+                            self.x[(a.id, h_type, r_id, t_id)] = v
+                            
+                            matching_blocks = [bv for bv, br, b_slots in block_choices if br == r_id and t_id in b_slots]
+                            if matching_blocks:
+                                self.model.add(v == sum(matching_blocks))
+                            else:
+                                self.model.add(v == 0)
+
+                            a_r_t_vars[(a.id, h_type)].append(v)
+                            f_t_vars[(f_id, t_id)].append(v)
+                            if sec_id:
+                                s_t_vars[(sec_id, t_id)].append(v)
+                            if batch_id:
+                                b_t_vars[(batch_id, t_id)].append(v)
+                            elif sec_id:
+                                for b in self.batches.values():
+                                    if b.section_id == sec_id:
+                                        b_t_vars[(b.id, t_id)].append(v)
+                            r_t_vars[(r_id, t_id)].append(v)
+                else:
+                    var_list = []
+                    for r_id in eligible_rooms:
+                        for t_id in eligible_slots:
+                            var_name = f"x_a{a.id}_{h_type}_r{r_id}_t{t_id}"
+                            v = self.model.new_bool_var(var_name)
+                            self.x[(a.id, h_type, r_id, t_id)] = v
+                            var_list.append(v)
+                            
+                            a_r_t_vars[(a.id, h_type)].append(v)
+                            f_t_vars[(f_id, t_id)].append(v)
+                            if sec_id:
+                                s_t_vars[(sec_id, t_id)].append(v)
+                            if batch_id:
+                                b_t_vars[(batch_id, t_id)].append(v)
+                            elif sec_id:
+                                for b in self.batches.values():
+                                    if b.section_id == sec_id:
+                                        b_t_vars[(b.id, t_id)].append(v)
+                            r_t_vars[(r_id, t_id)].append(v)
+                    
+                    self.assignment_vars.append((a, h_type, req_hours, var_list))
                 
         # 2. Hard Constraints
         
@@ -296,6 +379,8 @@ class TimetableSolver:
         W_ROOM_CHANGE = 5
         W_LATE_LAB = 5
         W_WORKLOAD_BALANCE = 10
+        W_FACULTY_BACK_TO_BACK = 20
+        W_NON_AFTERNOON_LAB = 15
 
         # Optimization profiles modify soft-objective penalties/bonuses without touching hard constraints
         if self.strategy == "FACULTY_COMFORT":
@@ -304,24 +389,30 @@ class TimetableSolver:
             W_PREFERRED_SLOT = 15
             W_ROOM_CHANGE = 2
             W_LATE_LAB = 5
+            W_FACULTY_BACK_TO_BACK = 40
+            W_NON_AFTERNOON_LAB = 15
         elif self.strategy == "ROOM_EFFICIENCY":
             W_ROOM_CHANGE = 25
             W_STUDENT_GAP = 15
             W_FACULTY_GAP = 5
             W_WORKLOAD_BALANCE = 5
             W_PREFERRED_SLOT = 5
+            W_FACULTY_BACK_TO_BACK = 15
+            W_NON_AFTERNOON_LAB = 10
         elif self.strategy == "LAB_PREFERENCE":
             W_LATE_LAB = 30
             W_STUDENT_GAP = 10
             W_FACULTY_GAP = 10
             W_PREFERRED_SLOT = 5
             W_ROOM_CHANGE = 5
+            W_FACULTY_BACK_TO_BACK = 20
+            W_NON_AFTERNOON_LAB = 35
 
         objective_terms = []
 
 
         # 1. Preferred Slot Bonus (maximize preference -> minimize -1 * preference)
-        # 2. Late Lab Penalty
+        # 2. Lab Scheduling Preferences (Late Lab vs Afternoon Lab)
         for (a_id, h_type, r_id, t_id), v in self.x.items():
             a = next(ast for ast in self.assignments if ast.id == a_id)
             
@@ -331,13 +422,16 @@ class TimetableSolver:
                 pref = fa.preference if fa.preference > 0 else 1
                 objective_terms.append(v * (-1 * W_PREFERRED_SLOT * pref))
                 
-            # Late Lab
+            # Lab slot timing
             c = self.courses.get(a.course_id)
             t = self.slots.get(t_id)
             if c and (c.requires_lab or c.course_type == 'LAB') and t:
-                # Late lab: starts at or after 14:00 (2:00 PM)
-                if t.start_time and t.start_time.hour >= 14:
+                # 1-hour lab: avoids late afternoon (> 14:00) in default BALANCED strategy
+                if c.practical_hours == 1 and t.start_time and t.start_time.hour >= 14:
                     objective_terms.append(v * W_LATE_LAB)
+                # Multi-hour lab blocks (2-3 periods): university preference is afternoon periods (>= 13:00)
+                elif (c.practical_hours >= 2 or self.strategy == "LAB_PREFERENCE") and t.start_time and t.start_time.hour < 13:
+                    objective_terms.append(v * W_NON_AFTERNOON_LAB)
 
         # Helper to get day groups
         slots_by_day = {}
@@ -346,12 +440,12 @@ class TimetableSolver:
                 slots_by_day[slot.day] = []
             slots_by_day[slot.day].append(t_id)
 
-        # 3. Faculty Gap Penalty & 6. Workload Variance (min-max daily workload)
-        # For each faculty and each day, compute first and last teaching slots, and total slots.
+        # 3. Faculty Gap Penalty, 6. Workload Variance & 8. Faculty Back-to-Back Penalty (> 2 periods)
+        # For each faculty and each day, compute first and last teaching slots, total slots, and consecutive runs.
         for f_id in self.faculty.keys():
             daily_workloads = []
             for day, t_ids in slots_by_day.items():
-                day_t_ids = sorted(t_ids) # assume ID sorts by time logically, or we could sort by start_time
+                day_t_ids = sorted(t_ids, key=lambda tid: (self.slots[tid].start_time or time(0, 0), tid))
                 
                 # faculty teaching in this slot
                 f_teaching_slots = []
@@ -372,6 +466,24 @@ class TimetableSolver:
                     
                 total_teaching = sum(var for _, var in f_teaching_slots)
                 daily_workloads.append(total_teaching)
+
+                # Penalize > 2 back-to-back periods (triples of consecutive slots)
+                for i in range(len(f_teaching_slots) - 2):
+                    t1_id, var1 = f_teaching_slots[i]
+                    t2_id, var2 = f_teaching_slots[i + 1]
+                    t3_id, var3 = f_teaching_slots[i + 2]
+                    s1 = self.slots.get(t1_id)
+                    s2 = self.slots.get(t2_id)
+                    s3 = self.slots.get(t3_id)
+                    is_consecutive = False
+                    if s1 and s2 and s3 and s1.end_time and s2.start_time and s2.end_time and s3.start_time:
+                        is_consecutive = (s1.end_time == s2.start_time and s2.end_time == s3.start_time)
+                    else:
+                        is_consecutive = True
+                    if is_consecutive:
+                        b2b_var = self.model.new_bool_var(f"f_{f_id}_{day}_b2b_{i}")
+                        self.model.add(var1 + var2 + var3 <= 2 + b2b_var)
+                        objective_terms.append(b2b_var * W_FACULTY_BACK_TO_BACK)
                 
                 # Active day boolean
                 is_active_day = self.model.new_bool_var(f"f_{f_id}_{day}_active")

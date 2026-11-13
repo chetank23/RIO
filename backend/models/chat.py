@@ -15,12 +15,15 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+_JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
 
 from backend.utils.datetime_utils import utc_now
 from .base import Base
@@ -76,9 +79,9 @@ class ChatMessage(Base):
     sender: Mapped[str] = mapped_column(String(20), nullable=False)  # 'user' | 'assistant'
     content: Mapped[str] = mapped_column(Text, nullable=False)
     intent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    tool_calls: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
-    sources: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
-    extra_metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    tool_calls: Mapped[Optional[list]] = mapped_column(_JSON_TYPE, nullable=True)
+    sources: Mapped[Optional[list]] = mapped_column(_JSON_TYPE, nullable=True)
+    extra_metadata: Mapped[Optional[dict]] = mapped_column(_JSON_TYPE, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utc_now, server_default=func.now()
     )

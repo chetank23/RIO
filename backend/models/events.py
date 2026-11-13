@@ -137,7 +137,6 @@ class CampusEvent(Base):
         Integer,
         ForeignKey("clubs.id", name="fk_campus_events_club_id", ondelete="SET NULL"),
         nullable=True,
-        index=True,
     )
     organizer_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     coordinator_id: Mapped[int] = mapped_column(
